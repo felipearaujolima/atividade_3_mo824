@@ -1,0 +1,273 @@
+package problems.qbf.solvers;
+
+import java.io.IOException;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+
+import metaheuristics.tabusearch.AbstractTS;
+import problems.qbf.QBF;
+import solutions.Solution;
+
+/**
+ * Metaheuristic TS (Tabu Search) for MAX-SC-QBF.
+ * Implements parameterized tabu tenure, search method (first/best improving),
+ * and different tabu strategies.
+ *
+ * Author: adaptado para atividade
+ */
+public class TS_QBF extends AbstractTS<Integer> {
+
+    private final Integer fake = new Integer(-1);
+
+    private boolean bestImproving; // true = best improving, false = first improving
+    private String tabuStrategy; // "default", "intensificationRestart", "diversificationRestart", "strategicOscillation"
+
+    /**
+     * Constructor
+     * @param tenure tabu tenure
+     * @param iterations max iterations
+     * @param filename problem instance filename
+     * @param bestImproving true para best improving, false para first improving
+     * @param tabuStrategy string indicando a estratégia tabu
+     * @throws IOException
+     */
+    public TS_QBF(Integer tenure, Integer iterations, String filename, boolean bestImproving, String tabuStrategy) throws IOException {
+        super(new QBF(filename), tenure, iterations);
+        this.bestImproving = bestImproving;
+        this.tabuStrategy = tabuStrategy;
+    }
+
+    @Override
+    public ArrayList<Integer> makeCL() {
+        ArrayList<Integer> _CL = new ArrayList<Integer>();
+        for (int i = 0; i < ObjFunction.getDomainSize(); i++) {
+            Integer cand = new Integer(i);
+            _CL.add(cand);
+        }
+        return _CL;
+    }
+
+    @Override
+    public ArrayList<Integer> makeRCL() {
+        ArrayList<Integer> _RCL = new ArrayList<Integer>();
+        return _RCL;
+    }
+
+    @Override
+    public ArrayDeque<Integer> makeTL() {
+        ArrayDeque<Integer> _TS = new ArrayDeque<Integer>(2 * tenure);
+        for (int i = 0; i < 2 * tenure; i++) {
+            _TS.add(fake);
+        }
+        return _TS;
+    }
+
+    @Override
+    public void updateCL() {
+        // do nothing
+    }
+
+    @Override
+    public Solution<Integer> createEmptySol() {
+        Solution<Integer> sol = new Solution<Integer>();
+        sol.cost = 0.0;
+        return sol;
+    }
+
+    /**
+     * Neighborhood move adapted to support first-improving and best-improving.
+     */
+    @Override
+    public Solution<Integer> neighborhoodMove() {
+
+        Double bestDeltaCost = null;
+        Integer bestCandIn = null, bestCandOut = null;
+
+        updateCL();
+
+        // Avaliar inserções
+        for (Integer candIn : CL) {
+            Double deltaCost = ObjFunction.evaluateInsertionCost(candIn, sol);
+            boolean isTabu = TL.contains(candIn);
+            boolean aspira = sol.cost + deltaCost > bestSol.cost;
+            boolean moveAllowed = !isTabu || aspira;
+
+            if (moveAllowed) {
+                if (bestImproving) {
+                    if (bestDeltaCost == null || deltaCost > bestDeltaCost) {
+                        bestDeltaCost = deltaCost;
+                        bestCandIn = candIn;
+                        bestCandOut = null;
+                    }
+                } else { // first improving
+                    if (deltaCost > 0) {
+                        bestDeltaCost = deltaCost;
+                        bestCandIn = candIn;
+                        bestCandOut = null;
+                        break; // para no primeiro movimento que melhora
+                    }
+                }
+            }
+        }
+
+        if (bestImproving || bestCandIn == null) {
+            // Avaliar remoções (somente se bestImproving ou ainda não achou movimento)
+            for (Integer candOut : sol) {
+                Double deltaCost = ObjFunction.evaluateRemovalCost(candOut, sol);
+                boolean isTabu = TL.contains(candOut);
+                boolean aspira = sol.cost + deltaCost > bestSol.cost;
+                boolean moveAllowed = !isTabu || aspira;
+
+                if (moveAllowed) {
+                    if (bestImproving) {
+                        if (bestDeltaCost == null || deltaCost > bestDeltaCost) {
+                            bestDeltaCost = deltaCost;
+                            bestCandIn = null;
+                            bestCandOut = candOut;
+                        }
+                    } else {
+                        if (deltaCost > 0) {
+                            bestDeltaCost = deltaCost;
+                            bestCandIn = null;
+                            bestCandOut = candOut;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (bestImproving || bestCandIn == null && bestCandOut == null) {
+            // Avaliar trocas (somente se bestImproving ou ainda não achou movimento)
+            outerLoop:
+            for (Integer candIn : CL) {
+                for (Integer candOut : sol) {
+                    Double deltaCost = ObjFunction.evaluateExchangeCost(candIn, candOut, sol);
+                    boolean isTabu = TL.contains(candIn) || TL.contains(candOut);
+                    boolean aspira = sol.cost + deltaCost > bestSol.cost;
+                    boolean moveAllowed = !isTabu || aspira;
+
+                    if (moveAllowed) {
+                        if (bestImproving) {
+                            if (bestDeltaCost == null || deltaCost > bestDeltaCost) {
+                                bestDeltaCost = deltaCost;
+                                bestCandIn = candIn;
+                                bestCandOut = candOut;
+                            }
+                        } else {
+                            if (deltaCost > 0) {
+                                bestDeltaCost = deltaCost;
+                                bestCandIn = candIn;
+                                bestCandOut = candOut;
+                                break outerLoop;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (bestCandIn == null && bestCandOut == null) {
+            // Nenhum movimento encontrado, aplicar estratégia tabu
+            applyTabuStrategy();
+            return null;
+        }
+
+        // Atualizar lista tabu
+        TL.poll();
+        if (bestCandOut != null) {
+            sol.remove(bestCandOut);
+            CL.add(bestCandOut);
+            TL.add(bestCandOut);
+        } else {
+            TL.add(fake);
+        }
+        TL.poll();
+        if (bestCandIn != null) {
+            sol.add(bestCandIn);
+            CL.remove(bestCandIn);
+            TL.add(bestCandIn);
+        } else {
+            TL.add(fake);
+        }
+
+        ObjFunction.evaluate(sol);
+
+        if (sol.cost > bestSol.cost) {
+            bestSol = new Solution<>(sol);
+        }
+
+        return null;
+    }
+
+    private void applyTabuStrategy() {
+        switch (tabuStrategy) {
+            case "intensificationRestart":
+                // Reiniciar a busca com a melhor solução até agora
+                sol.clear();
+                sol.addAll(bestSol);
+                sol.cost = bestSol.cost;
+                break;
+            case "diversificationRestart":
+                // Reiniciar com uma solução aleatória para diversificar
+                sol.clear();
+                int domainSize = ObjFunction.getDomainSize();
+                for (int i = 0; i < domainSize; i++) {
+                    if (Math.random() < 0.5) {
+                        sol.add(i);
+                    }
+                }
+                ObjFunction.evaluate(sol);
+                break;
+            case "strategicOscillation":
+                // Estratégia para alternar a solução (exemplo simples)
+                if (!sol.isEmpty()) {
+                    sol.remove(sol.iterator().next());
+                }
+                int randAdd = (int) (Math.random() * ObjFunction.getDomainSize());
+                if (!sol.contains(randAdd)) {
+                    sol.add(randAdd);
+                }
+                ObjFunction.evaluate(sol);
+                break;
+            default:
+                // Estratégia padrão - não faz nada
+                break;
+        }
+    }
+
+    /**
+     * Main para testar as configurações solicitadas.
+     */
+    public static void main(String[] args) throws IOException {
+
+        int maxIter = 1000;
+        int tenure1 = 7;
+        int tenure2 = 15;
+        String instance = "/home/user/Documentos/Mestrado/MO824/Atividade_3/TS-Framework/TS-Framework/instances/qbf/qbf020";
+
+        // Configuração 1 - padrão: first improving, tenure T1, estratégia default
+        TS_QBF ts1 = new TS_QBF(tenure1, maxIter, instance, false, "default");
+        long start1 = System.currentTimeMillis();
+        Solution<Integer> best1 = ts1.solve();
+        long end1 = System.currentTimeMillis();
+        System.out.println("PADRÃO: " + best1 + " Tempo: " + (end1 - start1) / 1000.0 + " seg");
+
+        // Configuração 2 - best improving, tenure T1, estratégia default
+        TS_QBF ts2 = new TS_QBF(tenure1, maxIter, instance, true, "default");
+        long start2 = System.currentTimeMillis();
+        Solution<Integer> best2 = ts2.solve();
+        long end2 = System.currentTimeMillis();
+        System.out.println("PADRÃO+BEST: " + best2 + " Tempo: " + (end2 - start2) / 1000.0 + " seg");
+
+        // Configuração 3 - first improving, tenure T2, estratégia default
+        TS_QBF ts3 = new TS_QBF(tenure2, maxIter, instance, false, "default");
+        long start3 = System.currentTimeMillis();
+        Solution<Integer> best3 = ts3.solve();
+        long end3 = System.currentTimeMillis();
+        System.out.println("PADRÃO+TENURE: " + best3 + " Tempo: " + (end3 - start3) / 1000.0 + " seg");
+
+        // Você pode adicionar mais configurações para as estratégias alternativas se quiser
+
+    }
+}
