@@ -3,9 +3,11 @@ package problems.qbf.solvers;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.List;
 
 import metaheuristics.tabusearch.AbstractTS;
 import problems.qbf.QBF;
+import problems.qbf.QBF_Inverse;
 import solutions.Solution;
 
 /**
@@ -21,6 +23,9 @@ public class TS_QBF extends AbstractTS<Integer> {
 
     private boolean bestImproving; // true = best improving, false = first improving
     private String tabuStrategy; // "default", "intensificationRestart", "diversificationRestart", "strategicOscillation"
+    private int[] usageCount;
+    private double diversificationFixationRate = 0.2;
+    private double diversificationSelectionProbability = 0.5;
 
     /**
      * Constructor
@@ -32,9 +37,28 @@ public class TS_QBF extends AbstractTS<Integer> {
      * @throws IOException
      */
     public TS_QBF(Integer tenure, Integer iterations, String filename, boolean bestImproving, String tabuStrategy) throws IOException {
-        super(new QBF(filename), tenure, iterations);
+        super(new QBF_Inverse(filename), tenure, iterations);
         this.bestImproving = bestImproving;
         this.tabuStrategy = tabuStrategy;
+        this.usageCount = new int[ObjFunction.getDomainSize()];
+    }
+
+    /**
+     * Diversification by Restart Constructor
+     * @param tenure tabu tenure
+     * @param iterations max iterations
+     * @param filename problem instance filename
+     * @param bestImproving true para best improving, false para first improving
+     * @param tabuStrategy string indicando a estratégia tabu
+     * @param diversificationFixationRate controla quantas variáveis serão fixadas (varia de 0 a 1)
+     * @param diversificationSelectionProbability probabilidade de uma variável ser selecionada na fase aleatória
+     * @throws IOException
+     */
+    public TS_QBF(Integer tenure, Integer iterations, String filename, boolean bestImproving, String tabuStrategy,
+                  double diversificationFixationRate, double diversificationSelectionProbability) throws IOException {
+        this(tenure, iterations, filename, bestImproving, tabuStrategy);
+        this.diversificationFixationRate = diversificationFixationRate;
+        this.diversificationSelectionProbability = diversificationSelectionProbability;
     }
 
     @Override
@@ -89,18 +113,18 @@ public class TS_QBF extends AbstractTS<Integer> {
         for (Integer candIn : CL) {
             Double deltaCost = ObjFunction.evaluateInsertionCost(candIn, sol);
             boolean isTabu = TL.contains(candIn);
-            boolean aspira = sol.cost + deltaCost > bestSol.cost;
+            boolean aspira = sol.cost + deltaCost < bestSol.cost;
             boolean moveAllowed = !isTabu || aspira;
 
             if (moveAllowed) {
                 if (bestImproving) {
-                    if (bestDeltaCost == null || deltaCost > bestDeltaCost) {
+                    if (bestDeltaCost == null || deltaCost < bestDeltaCost) {
                         bestDeltaCost = deltaCost;
                         bestCandIn = candIn;
                         bestCandOut = null;
                     }
                 } else { // first improving
-                    if (deltaCost > 0) {
+                    if (deltaCost < 0) {
                         bestDeltaCost = deltaCost;
                         bestCandIn = candIn;
                         bestCandOut = null;
@@ -115,18 +139,18 @@ public class TS_QBF extends AbstractTS<Integer> {
             for (Integer candOut : sol) {
                 Double deltaCost = ObjFunction.evaluateRemovalCost(candOut, sol);
                 boolean isTabu = TL.contains(candOut);
-                boolean aspira = sol.cost + deltaCost > bestSol.cost;
+                boolean aspira = sol.cost + deltaCost < bestSol.cost;
                 boolean moveAllowed = !isTabu || aspira;
 
                 if (moveAllowed) {
                     if (bestImproving) {
-                        if (bestDeltaCost == null || deltaCost > bestDeltaCost) {
+                        if (bestDeltaCost == null || deltaCost < bestDeltaCost) {
                             bestDeltaCost = deltaCost;
                             bestCandIn = null;
                             bestCandOut = candOut;
                         }
                     } else {
-                        if (deltaCost > 0) {
+                        if (deltaCost < 0) {
                             bestDeltaCost = deltaCost;
                             bestCandIn = null;
                             bestCandOut = candOut;
@@ -144,18 +168,18 @@ public class TS_QBF extends AbstractTS<Integer> {
                 for (Integer candOut : sol) {
                     Double deltaCost = ObjFunction.evaluateExchangeCost(candIn, candOut, sol);
                     boolean isTabu = TL.contains(candIn) || TL.contains(candOut);
-                    boolean aspira = sol.cost + deltaCost > bestSol.cost;
+                    boolean aspira = sol.cost + deltaCost < bestSol.cost;
                     boolean moveAllowed = !isTabu || aspira;
 
                     if (moveAllowed) {
                         if (bestImproving) {
-                            if (bestDeltaCost == null || deltaCost > bestDeltaCost) {
+                            if (bestDeltaCost == null || deltaCost < bestDeltaCost) {
                                 bestDeltaCost = deltaCost;
                                 bestCandIn = candIn;
                                 bestCandOut = candOut;
                             }
                         } else {
-                            if (deltaCost > 0) {
+                            if (deltaCost < 0) {
                                 bestDeltaCost = deltaCost;
                                 bestCandIn = candIn;
                                 bestCandOut = candOut;
@@ -184,6 +208,7 @@ public class TS_QBF extends AbstractTS<Integer> {
         }
         TL.poll();
         if (bestCandIn != null) {
+            usageCount[bestCandIn]++;
             sol.add(bestCandIn);
             CL.remove(bestCandIn);
             TL.add(bestCandIn);
@@ -192,10 +217,6 @@ public class TS_QBF extends AbstractTS<Integer> {
         }
 
         ObjFunction.evaluate(sol);
-
-        if (sol.cost > bestSol.cost) {
-            bestSol = new Solution<>(sol);
-        }
 
         return null;
     }
@@ -209,14 +230,33 @@ public class TS_QBF extends AbstractTS<Integer> {
                 sol.cost = bestSol.cost;
                 break;
             case "diversificationRestart":
-                // Reiniciar com uma solução aleatória para diversificar
-                sol.clear();
+                // 1. Identificar variáveis raramente usadas
+                // Encontra as 'k' variáveis com a menor contagem de uso
                 int domainSize = ObjFunction.getDomainSize();
+                int k = (int)(diversificationFixationRate * bestSol.size());
+                List<Integer> sortedVariables = new ArrayList<>();
+
                 for (int i = 0; i < domainSize; i++) {
-                    if (Math.random() < 0.5) {
+                    if (bestSol.contains(i)) {
+                        sortedVariables.add(i);
+                    }
+                }
+                // Ordena as variáveis pela contagem de uso (do menor para o maior)
+                sortedVariables.sort((a, b) -> Integer.compare(usageCount[a], usageCount[b]));
+
+                // 2. Criar a nova solução forçando a inclusão das variáveis raras
+                sol.clear();
+                for (int i = 0; i < k && i < sortedVariables.size(); i++) {
+                    sol.add(sortedVariables.get(i));
+                }
+
+                // 3. Completar a solução com um método aleatório
+                for (int i = 0; i < domainSize; i++) {
+                    if (!sol.contains(i) && Math.random() < diversificationSelectionProbability) {
                         sol.add(i);
                     }
                 }
+
                 ObjFunction.evaluate(sol);
                 break;
             case "strategicOscillation":
@@ -244,7 +284,7 @@ public class TS_QBF extends AbstractTS<Integer> {
         int maxIter = 1000;
         int tenure1 = 7;
         int tenure2 = 15;
-        String instance = "/home/user/Documentos/Mestrado/MO824/Atividade_3/TS-Framework/TS-Framework/instances/qbf/qbf020";
+        String instance = "TS-Framework/TS-Framework/instances/qbf/qbf060";
 
         // Configuração 1 - padrão: first improving, tenure T1, estratégia default
         TS_QBF ts1 = new TS_QBF(tenure1, maxIter, instance, false, "default");
@@ -266,6 +306,13 @@ public class TS_QBF extends AbstractTS<Integer> {
         Solution<Integer> best3 = ts3.solve();
         long end3 = System.currentTimeMillis();
         System.out.println("PADRÃO+TENURE: " + best3 + " Tempo: " + (end3 - start3) / 1000.0 + " seg");
+
+        // Configuração 4 - first improving, tenure T1, estratégia diversificationRestart
+        TS_QBF ts4 = new TS_QBF(tenure1, maxIter, instance, false, "diversificationRestart", 0.2, 0.5);
+        long start4 = System.currentTimeMillis();
+        Solution<Integer> best4 = ts4.solve();
+        long end4 = System.currentTimeMillis();
+        System.out.println("PADRÃO+DIVERSIFICATION: " + best4 + " Tempo: " + (end4 - start4) / 1000.0 + " seg");
 
         // Você pode adicionar mais configurações para as estratégias alternativas se quiser
 
